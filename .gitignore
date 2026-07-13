@@ -3,7 +3,6 @@ nuscenes_kitti/*
 v1.0-mini/*
 nuscenes_kitti/*
 logs/*
-common/*
 *.pyc
 /logs/*
 *.png
