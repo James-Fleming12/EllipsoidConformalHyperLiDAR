@@ -3,10 +3,9 @@ import torch
 import yaml
 
 from dataset.kitti.parser import Parser
-from modules.HDC_utils import Model, DensityModel
+from modules.HDC_utils import Model, EllipsoidModel
 from modules.trainer import DGLSSTrainer, Trainer
-from modules.ddfe_trainer import DDFETrainer
-from modules.Basic_HD import BasicHD, DensityTrainer
+from modules.Basic_HD import BasicHD, EllipsoidTrainer
 from modules.ioueval import iouEval
 
 from dataset.export_semantickitti import KittiConverter
@@ -48,11 +47,7 @@ def train_dglss(ARCH, DATA, dist_type="standard", epochs=FEATURE_EXTRACTOR_EPOCH
     trainer = DGLSSTrainer(ARCH, DATA, DATA_DIR, LOG_DIR, dist_type=dist_type) # saves in "/logs/SENet_..."
     trainer.train(epochs=epochs)
 
-def DDFEtrain_extractor(ARCH, DATA, epochs=FEATURE_EXTRACTOR_EPOCHS):
-    trainer = DDFETrainer(ARCH, DATA, DATA_DIR, LOG_DIR)
-    trainer.train(epochs=epochs)
-
-def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor=False) -> DensityModel:
+def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor=False) -> EllipsoidModel:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = Parser(root=data_dir if data_dir else DATA_DIR,
@@ -79,7 +74,7 @@ def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor
             x_cl = int(cl)
             ignore.append(x_cl)
 
-    trainer = DensityTrainer(ARCH, DATA, DATA_DIR, LOG_DIR, MODEL_DIR, None)
+    trainer = EllipsoidTrainer(ARCH, DATA, DATA_DIR, LOG_DIR, MODEL_DIR, None)
 
     trainer.train(dataloader, trainer.model, None)
 
@@ -88,7 +83,7 @@ def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor
         # Save checkpoint after each epoch so training can be picked up if interrupted
         torch.save(trainer.model, HDC_SAVE_PATH)
 
-    model: DensityModel = trainer.model
+    model: EllipsoidModel = trainer.model
     torch.save(model, HDC_SAVE_PATH)
 
     if return_extractor: return model, trainer
@@ -346,7 +341,7 @@ def init_sub(ARCH, DATA):
     
     dataloader = parser.get_train_set()
 
-    model: DensityModel = DensityModel(ARCH, MODEL_DIR, 'rp', 0, 0, NUM_CLASSES, device)
+    model: EllipsoidModel = EllipsoidModel(ARCH, MODEL_DIR, 'rp', 0, 0, NUM_CLASSES, device)
     model = torch.load(HDC_SAVE_PATH, weights_only=False)
 
     model.init_subclusters(dataloader)
@@ -376,7 +371,7 @@ def test_inference(ARCH, DATA):
     
     dataloader = parser.get_train_set()
 
-    model: DensityModel = DensityModel(ARCH, MODEL_DIR, 'rp', 0, 0, NUM_CLASSES, device)
+    model: EllipsoidModel = EllipsoidModel(ARCH, MODEL_DIR, 'rp', 0, 0, NUM_CLASSES, device)
     model.load_state_dict(torch.load(HDC_SUB_PATH, weights_only=False))
     model.to(device)
 

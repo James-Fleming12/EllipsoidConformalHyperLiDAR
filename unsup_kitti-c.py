@@ -273,8 +273,7 @@ def load_hdc_model(path, num_classes=NUM_CLASSES):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ARCH = yaml.safe_load(open(CONFIG_ARCH, 'r'))
     modeldir = os.path.dirname(path)
-    
-    # If we might need Exp A, load AugModel instead of base DensityModel
+
     model = set_dense_model(ARCH, modeldir, 'rp', 0, 0, num_classes, device)
     
     model.load_state_dict(torch.load(path, map_location=device))
