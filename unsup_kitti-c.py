@@ -13,8 +13,8 @@ from common.laserscan import SemLaserScan, LaserScan
 from dataset.kitti.parser import Parser
 import unsup_main
 from unsup_main import train_extractor, train_hdc, extract_metrics_from_conf_matrix, setup_logger, save_graphic
-from modules.HDC_utils import EllipsoidModel
-from modules.HDC_utils import set_dense_model
+from modules.HDC_utils import KNNModel
+from modules.HDC_utils import set_knn_model
 
 NUM_CLASSES = 7
 KITTI_DATA_DIR = "/mnt/alpha/jmfleming/KITTI"
@@ -273,7 +273,7 @@ def load_hdc_model(path, num_classes=NUM_CLASSES):
     ARCH = yaml.safe_load(open(CONFIG_ARCH, 'r'))
     modeldir = os.path.dirname(path)
 
-    model = set_dense_model(ARCH, modeldir, 'rp', 0, 0, num_classes, device)
+    model = set_knn_model(ARCH, modeldir, 'rp', 0, 0, num_classes, device)
     
     model.load_state_dict(torch.load(path, map_location=device))
     model.to(device)

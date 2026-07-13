@@ -7,7 +7,7 @@ import laspy
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from modules.HDC_utils import EllipsoidModel
+from modules.HDC_utils import KNNModel
 
 CLASS_MAP = {
     "car": 0,
@@ -188,7 +188,7 @@ class AiMotiveEllipsoidTrainer:
     Minimal stand-in for EllipsoidTrainer that works with aiMotive DataLoaders.
     Avoids the KITTI Parser entirely while reusing the HDC train/retrain logic.
     """
-    def __init__(self, model: EllipsoidModel, num_classes: int, device: torch.device, bipolar_prototypes: bool = False):
+    def __init__(self, model: KNNModel, num_classes: int, device: torch.device, bipolar_prototypes: bool = False):
         self.model = model
         self.num_classes = num_classes
         self.device = device

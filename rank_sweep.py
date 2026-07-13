@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader
 
 from dataset.kitti.parser import Parser
-from modules.HDC_utils import EllipsoidModel
+from modules.HDC_utils import KNNModel
 
 import os
 
@@ -164,7 +164,7 @@ def main():
     clean_ds = parser.validloader.dataset
 
     print(f"Loading pretrained model from {PRETRAINED}...")
-    model = EllipsoidModel(ARCH, MODEL_DIR, "rp", 0, 0, NUM_CLASSES, device)
+    model = KNNModel(ARCH, MODEL_DIR, "rp", 0, 0, NUM_CLASSES, device)
     sd = torch.load(PRETRAINED, map_location=device, weights_only=False)
     sd = sd.state_dict() if isinstance(sd, torch.nn.Module) else sd
     if "subclusters" in sd and hasattr(model, "subclusters"):

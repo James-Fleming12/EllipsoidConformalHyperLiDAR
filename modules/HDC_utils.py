@@ -244,9 +244,9 @@ class Model(nn.Module):
 def set_model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device):
     return Model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device)
 
-class EllipsoidModel(nn.Module):
+class KNNModel(nn.Module):
     def __init__(self, ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device, gauss_rp=True, use_adaptor=True):
-        super(EllipsoidModel, self).__init__()
+        super(KNNModel, self).__init__()
 
         self.device = device
         self.use_adaptor = use_adaptor
@@ -472,5 +472,5 @@ class EllipsoidModel(nn.Module):
     def online_update(self, x):
         pass
     
-def set_dense_model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device, subcluster_type='bipolar'):
-    return EllipsoidModel(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device)
+def set_knn_model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device, subcluster_type='bipolar'):
+    return KNNModel(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device)

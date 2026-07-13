@@ -1,4 +1,4 @@
-# Adaptive Ellipsoidal Confidence Sets for Hyperdimensional Test-Time Adaptation
+# Adaptive KNN-Based Confidence Sets for Hyperdimensional Test-Time Adaptation
 
 ## 1. Problem Setting
 
@@ -51,102 +51,53 @@ Two consequences follow, and they set up the two halves of the contribution:
 So we need **(a)** a better-shaped confidence set, and **(b)** a way to move it as the
 domain moves. Those are the two contributions.
 
-## 3. Contribution 1: Ellipsoidal Confidence Sets
+## 3. Contribution 1: Non-Parametric KNN Confidence Sets
 
-### Why the usual gates are the wrong shape
+### Why parametric gates fail in HD space
 
-The standard HDC gates are all implicitly **isotropic**:
+Standard confidence sets attempt to model the density of each class parametrically:
+- **Balls (Prototypes/Centroids):** Assume the trustworthy region is isotropic.
+- **Unions of Balls (Subclusters):** Try to capture multi-modality but remain isotropic locally.
+- **Ellipsoids (Covariance/Mahalanobis):** Try to capture anisotropy by squashing high-variance directions.
 
-- **Prototype gating.** One vector per class; admit if cosine similarity exceeds a
-  threshold. The implied confidence set is a spherical cap — a ball.
-- **Multi-mode (subcluster) gating.** `K` mode vectors per class; admit if the max
-  similarity to any mode exceeds a threshold. The implied confidence set is a **union of
-  K balls**.
+In the high-dimensional, low-sample regime ($n \ll d$) typical of HDC, second-order estimators like covariance ellipsoids are completely noise-dominated. More importantly, attempting to minimize the *volume* of the confidence set (by shrinking principal axes) actively destroys the correctness signal, because domain shift corruptions displace samples precisely along a class's own principal axes. 
 
-Both assume the trustworthy region is (a union of) balls. There is no reason a class
-manifold in HDC space should be isotropic — variance is typically concentrated in a few
-nuisance directions while the discriminative directions are comparatively tight.
-Covering an elongated, anisotropic manifold with a **ball** forces a bad tradeoff: the
-ball must be large enough to span the elongated direction, which makes it far too
-permissive in every other direction. It admits exactly the corrupted samples it was
-meant to reject.
+Furthermore, parametric metrics ask: *"How close is this point to its own class?"* But pseudo-label correctness is comparative: a label is wrong exactly when another class fits better.
 
-**Hypothesis: the failure of similarity-threshold gating is a failure of _shape_, not of
-granularity.**
+**Hypothesis: The failure of parametric gating is a failure of _estimation_ and _contrastiveness_, not granularity.**
 
-### The fix
+### The fix: Contrastive k-Nearest Neighbors
 
-We adopt the confidence-set machinery of Gao, Shan, Srinivas & Vijayaraghavan
-(*Computing High-dimensional Confidence Sets for Arbitrary Distributions*,
-arXiv:2504.02723), whose central result is exactly the one we need.
+Instead of fitting parametric models, we use a non-parametric, contrastive k-NN ratio based on a frozen "bank" of source samples. For any target sample, we compute two distances based on cosine similarity:
 
-Finding the minimum-volume **ball** covering a `δ` fraction of an arbitrary distribution
-is NP-hard to approximate well (their Thm 1.3 — *proper* learning is intractable). But
-allowing the output to be an **ellipsoid** — *improper* learning — does dramatically
-better in polynomial time: `exp(Õ(d^{1/2}))`-competitive in volume, versus
-`exp(Õ(d / log d))` for the best ball-based (coreset) methods (their Thm 1.1).
+1.  **$d_{in}$**: The mean distance to its $k$ nearest neighbors *within its predicted class*. This non-parametrically captures local, non-convex density.
+2.  **$d_{out}$**: The mean distance to its $k$ nearest neighbors *across all other classes combined*. This represents the nearest competing hypothesis.
 
-The mechanism is precisely the anisotropy fix we want:
-
-1. Estimate a preconditioner `M^{-1/2}` that **shrinks the high-variance directions** of
-   the class manifold and leaves the low-variance directions alone.
-2. In the transformed (approximately isotropic) space, a **ball centered at the mean** is
-   a good confidence set — their Lemma 2.1 shows that once variance is controlled, the
-   mean is a good proxy for the true optimal center.
-3. Map back through `M^{1/2}`. The result is an **ellipsoid**: tight along the
-   discriminative directions, appropriately elongated along the nuisance directions.
-
-The gate becomes a Mahalanobis-style score with their specific preconditioner:
+**The Output Score (`knn_ratio`)**: We rank confidence using the contrastive ratio **$d_{in} / d_{out}$**. 
 
 ```
-score(h) = || M_c^{-1/2} (h - mu_c) ||_2        admit iff  score(h) <= R_c
+score(h) = d_in / d_out        admit iff  score(h) <= τ_c
 ```
 
-with `R_c` calibrated so the set covers a `δ` fraction of source-domain representations
-of class `c`.
+with `τ_c` calibrated so the set covers a `δ` fraction of source-domain representations of class `c`.
 
-**Why volume, not just coverage.** A region that achieves `δ` coverage but sprawls
-across the space admits everything and gives no selectivity. Coverage without
-volume-optimality is a useless gate. The volume-competitive guarantee is what makes this
-a *discriminative* confidence set rather than a tautological one — and it is exactly what
-ball-based gates provably cannot achieve in high dimensions.
-
-**Multi-modality, done right.** Their Thm 1.2 and greedy algorithm extend the result to
-**unions of `k` ellipsoids**. A class genuinely can be multi-modal; the mistake is
-forcing each mode into a ball. Prediction: gate quality should **improve** with `k` for
-unions of ellipsoids — in contrast to unions of balls, where added modes buy little and
-can actively hurt.
-
-**Conformal guarantee.** The construction conformalizes via nested sets (their §7),
-giving distribution-free coverage under exchangeability while remaining approximately
-volume-optimal under i.i.d. sampling. The gate is therefore not a heuristic threshold —
-it is a conformal predictor with a coverage guarantee.
+This bypasses the dimensionality curse entirely because it estimates no covariance matrices. It directly isolates the boundary samples where pseudo-labels are likely to fail, yielding massive AUROC gains over distance-to-centroid and prototype-margin baselines.
 
 ## 4. Contribution 2: Adapting the Confidence Sets
 
 A well-shaped but **static** set is calibrated to the source distribution. Per §2, HDC
 representations move substantially under shift — so the set must move too.
 
-Three update rules of increasing expressiveness, to be ablated:
+Two adaptation mechanisms to maintain the k-NN confidence sets:
 
-- **(a) Center tracking.** EMA the ellipsoid center `mu_c` toward admitted target
-  samples. Cheapest; handles pure translation of the manifold.
+- **(a) Bank Updating (Tracking the Manifold).** As target samples are admitted with high confidence, they are added to the k-NN bank (e.g., via a FIFO queue replacing older source samples). This allows the non-parametric manifold to seamlessly drift and deform alongside the target domain shift.
 
-- **(b) Center + conformal radius recalibration.** Additionally adjust `R_c` online so
+- **(b) Conformal Threshold Recalibration.** Adjust the threshold `τ_c` online so
   the set maintains its target coverage `δ` on the observed target stream. This is the
   most principled option: coverage is exactly what conformal prediction guarantees, so
   *maintaining coverage under shift* is the natural adaptation objective. It also
   structurally prevents both failure modes — the gate cannot slam shut (coverage would
   collapse) nor admit everything (coverage would overshoot).
-
-- **(c) Shape tracking.** Additionally EMA the covariance and periodically recompute the
-  preconditioner `M_c`. Most expressive, most drift-prone; needs an anchor back to the
-  source shape.
-
-**The story:** we do not merely build a better-shaped confidence set — we keep it
-*calibrated* as the domain moves. The extra compute buys geometry (ellipsoids over balls)
-and calibration (online coverage maintenance), both motivated by a measured property of
-HDC under shift rather than bolted on.
 
 ## 5. Evaluation Plan
 
@@ -155,23 +106,20 @@ HDC under shift rather than bolted on.
 **Primary test — gate quality, independent of adaptation.** AUROC and precision–coverage
 curves for predicting pseudo-label correctness, comparing:
 
-| Gate | Implied confidence set |
+| Gate | Implied confidence set / Mechanism |
 |---|---|
-| Prototype cosine similarity | spherical cap (ball) |
-| Union-of-K max-similarity | union of K balls |
-| **Single ellipsoid** | ellipsoid |
-| **Union-of-k ellipsoids** | union of k ellipsoids |
-| Shrinkage Mahalanobis (`Σ + λI`)⁻¹ | ellipsoid, no eigenvalue binning |
-
-That last row is the key ablation: it isolates whether the paper's *specific*
-preconditioner matters, or whether *any* anisotropic metric suffices.
+| **Prototype Cosine Similarity** | Spherical cap (learned direction) |
+| **Unsupervised Centroid (Ball)** | First-order, own-class only |
+| **Margin (top1 - top2)** | Cheap prototype contrastive |
+| **k-NN In-Class Only** | Local density only |
+| **k-NN Ratio (Proposal A)** | Contrastive + Non-parametric |
 
 This test needs no adaptation loop and is immune to every confound in the TTA pipeline.
-**Run it first** — if the ellipsoid does not beat the ball on AUROC, the rest of the
+**Run it first** — if the k-NN ratio does not decisively beat the ball on AUROC, the rest of the
 method has no foundation.
 
 **Secondary test — adaptation.** Target accuracy under TTA, comparing static vs. adaptive
-confidence sets (rules a/b/c), against a frozen baseline.
+confidence sets (bank updating + conformal recalibration), against a frozen baseline.
 
 **Reporting discipline.** Adaptation gains must be measured against a frozen model on the
 *same* samples. Any metric that accumulates over a stream conflates adaptation with drift

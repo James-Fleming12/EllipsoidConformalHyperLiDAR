@@ -13,7 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from dataset.kitti.parser import Parser
 import unsup_main
 from unsup_main import train_extractor, train_hdc, extract_metrics_from_conf_matrix, setup_logger, save_graphic
-from modules.HDC_utils import EllipsoidModel
+from modules.HDC_utils import KNNModel
 from modules.aug_model import AugModel
 
 NUM_CLASSES = 17  # 16 shared cross-dataset classes + 1 ignored class (0)

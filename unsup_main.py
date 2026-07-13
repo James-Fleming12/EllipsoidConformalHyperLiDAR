@@ -6,9 +6,9 @@ import yaml
 import matplotlib.pyplot as plt
 
 from dataset.kitti.parser import Parser
-from modules.HDC_utils import Model, EllipsoidModel
+from modules.HDC_utils import Model, KNNModel
 from modules.trainer import Trainer
-from modules.Basic_HD import EllipsoidTrainer
+from modules.Basic_HD import KNNTrainer
 
 MODEL_DIR = "logs"
 NU_DATA_DIR = "/mnt/alpha/jmfleming/HyperLidar_dataset/nuscenes_all"
@@ -71,7 +71,7 @@ def extract_metrics_from_conf_matrix(conf_matrix):
 
 def load_hdc_model(path):
     print(f"Loading pretrained HDC model from {path}...")
-    from modules.HDC_utils import EllipsoidModel
+    from modules.HDC_utils import KNNModel
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     ARCH = yaml.safe_load(open("config/arch/senet-2048p.yml", 'r'))
     import os
@@ -82,7 +82,7 @@ def load_hdc_model(path):
         NUM_CLASSES = tmp_dict['state_dict']['semantic_output.bias'].shape[0]
     else:
         NUM_CLASSES = 13 # Fallback
-    model = EllipsoidModel(ARCH, modeldir, 'rp', 0, 0, NUM_CLASSES, device, subcluster_type='continuous')
+    model = KNNModel(ARCH, modeldir, 'rp', 0, 0, NUM_CLASSES, device, subcluster_type='continuous')
     model.load_state_dict(torch.load(path, map_location=device))
     model.to(device)
     return model
@@ -95,7 +95,7 @@ def train_extractor(ARCH, DATA, epochs=FEATURE_EXTRACTOR_EPOCHS, data_dir=None, 
     if return_trainer:
         return trainer
 
-def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor=False) -> EllipsoidModel:
+def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor=False) -> KNNModel:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     parser = Parser(root=data_dir if data_dir else DATA_DIR,
@@ -122,7 +122,7 @@ def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor
             x_cl = int(cl)
             ignore.append(x_cl)
 
-    trainer = EllipsoidTrainer(ARCH, DATA, DATA_DIR, LOG_DIR, MODEL_DIR, None)
+    trainer = KNNTrainer(ARCH, DATA, DATA_DIR, LOG_DIR, MODEL_DIR, None)
 
     trainer.train(dataloader, trainer.model, None)
 
@@ -131,7 +131,7 @@ def train_hdc(ARCH, DATA, epochs=MAX_HDC_EPOCHS, data_dir=None, return_extractor
         # Save checkpoint after each epoch so training can be picked up if interrupted
         torch.save(trainer.model, HDC_SAVE_PATH)
 
-    model: EllipsoidModel = trainer.model
+    model: KNNModel = trainer.model
     torch.save(model, HDC_SAVE_PATH)
 
     if return_extractor: return model, trainer
