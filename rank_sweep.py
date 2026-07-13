@@ -175,9 +175,11 @@ def main():
             sev_str = SEVERITY_MAP.get(SEVERITY, 'moderate')
             corruption_root = os.path.join(KITTIC_DIR, cond, sev_str)
             seq_dir = os.path.join(corruption_root, "sequences")
-            if not os.path.exists(seq_dir):
+            seq_08 = os.path.join(seq_dir, "08")
+            if not os.path.exists(seq_08):
                 os.makedirs(seq_dir, exist_ok=True)
-                os.symlink("..", os.path.join(seq_dir, "08"))
+                if not os.path.islink(seq_08):
+                    os.symlink("..", seq_08)
             
             parser_obj = Parser(
                 root=corruption_root,
@@ -193,11 +195,10 @@ def main():
             H, P, C = collect_target(model, ld, device)
             acc = C.float().mean().item()
             print(f"  n={len(C)}  pseudo-label acc={acc:.3f}")
-            if acc < 1.5 / NUM_CLASSES:
-                print(f"  !! WARNING: accuracy is at/below random chance "
-                      f"(~{1/NUM_CLASSES:.3f}) for {NUM_CLASSES} classes. This chunk is "
-                      f"probably broken (label misalignment), and its AUROC will be "
-                      f"meaningless. Exclude it from any conclusion.")
+            if acc < 0.2:
+                print(f"  !! WARNING: accuracy is {acc:.3f}, suspiciously low "
+                      f"(possible label misalignment). Excluding it from evaluation.")
+                continue
             tgt[cond] = (H, P, C)
         except Exception as e:
             print(f"  SKIPPED ({type(e).__name__}: {e})")
@@ -221,18 +222,35 @@ def main():
                 m = Pd == c
                 e = ells[c]
 
-                s[m] = -score_ellipsoid(Hd[m], e["mu"], e["V"], d)
-            correct = C.numpy().astype(int)
-            if len(np.unique(correct)) < 2:
+                s[m] = -score_ellipsoid(Hd[m], e["mu"], e["V"], d) / max(e["R"], 1e-8)
+            
+            # Compute per-class AUROC, then average
+            correct_all = C.numpy().astype(int)
+            scores_all = s.cpu().numpy()
+            preds_all = Pd.cpu().numpy()
+            
+            auroc_list = []
+            for c in np.unique(preds_all):
+                if c not in ells:
+                    continue
+                mask_c = preds_all == c
+                if mask_c.sum() < 50:
+                    continue
+                correct_c = correct_all[mask_c]
+                scores_c = scores_all[mask_c]
+                if len(np.unique(correct_c)) == 2:
+                    auroc_list.append(roc_auc_score(correct_c, scores_c))
+            
+            if not auroc_list:
                 continue
-            per[cond] = float(roc_auc_score(correct, s.cpu().numpy()))
+            per[cond] = float(np.mean(auroc_list))
 
         mean_auroc = float(np.mean(list(per.values()))) if per else float("nan")
         results[r] = {"mean_auroc": mean_auroc, "mean_log_volume": mlv,
                       "per_corruption": per}
 
         tag = "   <-- BALL BASELINE" if r == 0 else ""
-        detail = " ".join(f"{k[:4]}={v:.3f}" for k, v in per.items())
+        detail = " ".join(f"{k[:8]}={v:.3f}" for k, v in per.items())
         print(f"{r:>5} {mean_auroc:>10.4f} {mlv:>11.1f}   {detail}{tag}")
 
     with open(OUT, "w") as f:
