@@ -23,24 +23,39 @@ NUM_CLASSES = 17
 
 CORRUPTIONS = ["fog", "snow", "motion", "beam", "crosstalk", "echo", "cross_sensor"]
 SEVERITY = 3
-RANKS = (0, 4, 8, 16, 32, 64, 128, 256)
+RANKS_BY_MODE = {
+    "ellipsoid": (0, 4, 8, 16, 32, 64, 128, 256),
+    "residual":  (0, 4, 8, 16, 32, 64, 128, 256),
+    "anti":      (0, 4, 8, 16, 32, 64, 128, 256),
+    "subspace":  (1, 2, 4, 8, 16, 32, 64, 128, 256),
+}
 COVERAGE = 0.90
 MAX_PER_CLASS = 5000
 RADIUS_QUANTILE = 0.99
 OUT = "rank_sweep.json"
 
 @torch.no_grad()
-def score_ellipsoid(H, mu, V, d):
-    """|| M^{-1/2} (h - mu) ||_2 for each row. Lower = more in-distribution."""
+def score_subspace(H, mu, V, d, mode="ellipsoid"):
     delta = H.float() - mu
     sq = delta.pow(2).sum(dim=1)
-    if V.shape[1] > 0:
-        proj = delta @ V
-        sq = sq - (1.0 - 1.0 / d) * proj.pow(2).sum(dim=1)
-    return sq.clamp_min(0).sqrt()
+    if V.shape[1] == 0:
+        return sq.clamp_min(0).sqrt()
+    proj_sq = (delta @ V).pow(2).sum(dim=1)
+
+    if mode == "ellipsoid":      # paper: shrink high-var dirs
+        out = sq - (1.0 - 1.0 / d) * proj_sq
+    elif mode == "subspace":     # score ONLY in the high-var subspace
+        out = proj_sq
+    elif mode == "residual":     # score ONLY orthogonal to it (the r->limit of above)
+        out = sq - proj_sq
+    elif mode == "anti":         # AMPLIFY the high-var dirs
+        out = sq + 9.0 * proj_sq
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+    return out.clamp_min(0).sqrt()
 
 @torch.no_grad()
-def fit_ellipsoid(Y, d, rank, coverage=COVERAGE):
+def fit_ellipsoid(Y, d, rank, coverage=COVERAGE, mode="ellipsoid"):
     """Fit to source hypervectors Y of ONE class. rank=0 -> ball at the centroid."""
     Y = Y.float()
     n = Y.shape[0]
@@ -54,7 +69,7 @@ def fit_ellipsoid(Y, d, rank, coverage=COVERAGE):
         _, S, Vfull = torch.pca_lowrank(delta, q=q, center=False, niter=4)
         V = Vfull[:, :rank].contiguous()
 
-    R = torch.quantile(score_ellipsoid(Y, mu, V, d), coverage).item()
+    R = torch.quantile(score_subspace(Y, mu, V, d, mode=mode), coverage).item()
     return {"mu": mu, "V": V, "R": R, "r": V.shape[1], "d": d}
 
 def log_volume(e):
@@ -203,81 +218,77 @@ def main():
         except Exception as e:
             print(f"  SKIPPED ({type(e).__name__}: {e})")
 
-    print("\n" + "=" * 78)
-    print(f"{'rank':>5} {'meanAUROC':>10} {'log_vol':>11}   per-corruption AUROC")
-    print("=" * 78)
-
     results = {}
-    for r in RANKS:
-        ells = {c: fit_ellipsoid(Y, d, rank=r) for c, Y in src.items()}
-        mlv = float(np.mean([log_volume(e) for e in ells.values()]))
+    modes = ["ellipsoid", "subspace", "residual", "anti"]
+    
+    for mode in modes:
+        print("\n" + "=" * 78)
+        print(f"MODE: {mode.upper()}")
+        print(f"{'rank':>5} {'meanAUROC':>10} {'log_vol':>11}   per-corruption AUROC")
+        print("=" * 78)
+        
+        results[mode] = {}
+        for r in RANKS_BY_MODE[mode]:
+            ells = {c: fit_ellipsoid(Y, d, rank=r, mode=mode) for c, Y in src.items()}
+            mlv = float(np.mean([log_volume(e) for e in ells.values()]))
 
-        per = {}
-        for cond, (H, P, C) in tgt.items():
-            Hd, Pd = H.to(device), P.to(device)
-            s = torch.full((Hd.shape[0],), -1e9, device=device)
-            for c in Pd.unique().tolist():
-                if c not in ells:
+            per = {}
+            per_classes = {}
+            for cond, (H, P, C) in tgt.items():
+                Hd, Pd = H.to(device), P.to(device)
+                s = torch.full((Hd.shape[0],), -1e9, device=device)
+                for c in Pd.unique().tolist():
+                    if c not in ells:
+                        continue
+                    m = Pd == c
+                    e = ells[c]
+
+                    s[m] = -score_subspace(Hd[m], e["mu"], e["V"], d, mode=mode) / max(e["R"], 1e-8)
+                
+                # Compute per-class AUROC, then average
+                correct_all = C.numpy().astype(int)
+                scores_all = s.cpu().numpy()
+                preds_all = Pd.cpu().numpy()
+                
+                auroc_list = []
+                for c in np.unique(preds_all):
+                    if c not in ells:
+                        continue
+                    mask_c = preds_all == c
+                    if mask_c.sum() < 50:
+                        continue
+                    correct_c = correct_all[mask_c]
+                    scores_c = scores_all[mask_c]
+                    if len(np.unique(correct_c)) == 2:
+                        auroc_list.append(roc_auc_score(correct_c, scores_c))
+                
+                if not auroc_list:
                     continue
-                m = Pd == c
-                e = ells[c]
+                per[cond] = float(np.mean(auroc_list))
+                per_classes[cond] = len(auroc_list)
 
-                s[m] = -score_ellipsoid(Hd[m], e["mu"], e["V"], d) / max(e["R"], 1e-8)
-            
-            # Compute per-class AUROC, then average
-            correct_all = C.numpy().astype(int)
-            scores_all = s.cpu().numpy()
-            preds_all = Pd.cpu().numpy()
-            
-            auroc_list = []
-            for c in np.unique(preds_all):
-                if c not in ells:
-                    continue
-                mask_c = preds_all == c
-                if mask_c.sum() < 50:
-                    continue
-                correct_c = correct_all[mask_c]
-                scores_c = scores_all[mask_c]
-                if len(np.unique(correct_c)) == 2:
-                    auroc_list.append(roc_auc_score(correct_c, scores_c))
-            
-            if not auroc_list:
-                continue
-            per[cond] = float(np.mean(auroc_list))
+            mean_auroc = float(np.mean(list(per.values()))) if per else float("nan")
+            results[mode][r] = {"mean_auroc": mean_auroc, "mean_log_volume": mlv,
+                          "per_corruption": per}
 
-        mean_auroc = float(np.mean(list(per.values()))) if per else float("nan")
-        results[r] = {"mean_auroc": mean_auroc, "mean_log_volume": mlv,
-                      "per_corruption": per}
-
-        tag = "   <-- BALL BASELINE" if r == 0 else ""
-        detail = " ".join(f"{k[:8]}={v:.3f}" for k, v in per.items())
-        print(f"{r:>5} {mean_auroc:>10.4f} {mlv:>11.1f}   {detail}{tag}")
+            tag = "   <-- BALL BASELINE" if r == 0 else ""
+            detail = " ".join(f"{k[:8]}={v:.3f}({per_classes[k]}c)" for k, v in per.items())
+            print(f"{r:>5} {mean_auroc:>10.4f} {mlv:>11.1f}   {detail}{tag}")
 
     with open(OUT, "w") as f:
         json.dump(results, f, indent=2)
     print(f"\nsaved -> {OUT}")
 
-    base = results[0]["mean_auroc"]
-    best_r = max(results, key=lambda k: results[k]["mean_auroc"])
-    best = results[best_r]["mean_auroc"]
-    delta = best - base
-
     print("\n" + "=" * 78)
-    print(f"ball  (r=0):   AUROC={base:.4f}  log_vol={results[0]['mean_log_volume']:.1f}")
-    print(f"best  (r={best_r}):  AUROC={best:.4f}  log_vol={results[best_r]['mean_log_volume']:.1f}")
-
-    if delta > 0.02:
-        print(f"\n=> SHAPE HELPS (+{delta:.4f} AUROC over the ball). The anisotropy")
-        print(f"   hypothesis holds. Use r={best_r} as the operating point, then proceed")
-        print("   to the union-of-k and adaptation experiments.")
-    elif delta > 0.005:
-        print(f"\n=> MARGINAL (+{delta:.4f}). Before believing it, check the per-corruption")
-        print("   column: a gain driven by one corruption is not a result. It must be")
-        print("   consistent across them.")
-    else:
-        print(f"\n=> SHAPE DOES NOT HELP (+{delta:.4f}). Anisotropy carries no information")
-        print("   about pseudo-label correctness in this space. The premise is wrong --")
-        print("   STOP before building the adaptation machinery.")
+    print("SUMMARY OF RESULTS")
+    print("=" * 78)
+    for mode in modes:
+        mode_results = results[mode]
+        base = results["ellipsoid"][0]["mean_auroc"]
+        best_r = max(mode_results, key=lambda k: mode_results[k]["mean_auroc"])
+        best = mode_results[best_r]["mean_auroc"]
+        delta = best - base
+        print(f"[{mode.upper():<9}] ball(r=0): {base:.4f}  |  best(r={best_r:<3}): {best:.4f}  |  diff: {delta:+.4f}")
 
 if __name__ == "__main__":
     main()
