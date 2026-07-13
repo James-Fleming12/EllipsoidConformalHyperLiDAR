@@ -150,9 +150,7 @@ HDC under shift rather than bolted on.
 
 ## 5. Evaluation Plan
 
-**Benchmark.** CIFAR10 → CIFAR10-C (primary; where the motivating observation was
-measured). Extension to further corruption / cross-domain benchmarks once the method is
-established.
+**Benchmark.** SemanticKITTI -> SemanticKITTI-C and NuScenes -> NuScenes-C
 
 **Primary test — gate quality, independent of adaptation.** AUROC and precision–coverage
 curves for predicting pseudo-label correctness, comparing:
