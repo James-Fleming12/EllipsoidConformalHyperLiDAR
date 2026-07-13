@@ -303,7 +303,7 @@ def load_hdc_model(path, num_classes=NUM_CLASSES):
 
     model = set_knn_model(ARCH, modeldir, 'rp', 0, 0, num_classes, device)
     
-    model.load_state_dict(torch.load(path, map_location=device))
+    model.load_state_dict(torch.load(path, map_location=device), strict=False)
     model.to(device)
     return model
 
