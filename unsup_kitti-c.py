@@ -203,27 +203,11 @@ def evaluate_and_adapt(model, target_dataloader, device, eval_only=False, update
                         threshold=-1.2 # Contrastive gate for k-NN
                     )
                 elif update_method == 'prototype':
-                    # Baseline prototype gating: reuse online_update but hack the confidence to be prototype cosine similarity
-                    # To do this cleanly, we will pass a high threshold and just rely on the fallback or we can implement a custom update_fn.
-                    # Since we want to use EMA style but with prototype gating, let's implement a tiny custom update inline.
-                    enc, _, _ = model.encode(proj_in)
-                    original_x = proj_in.permute(0, 2, 3, 1).contiguous().reshape(-1, proj_in.shape[1])
-                    valid_mask = torch.any(original_x != 0, dim=1)
-                    if torch.any(valid_mask):
-                        active_enc = torch.nn.functional.normalize(enc[valid_mask])
-                        logits = model.classify(active_enc)
-                        preds = torch.argmax(logits, dim=1)
-                        sims = logits.max(dim=1).values
-                        valid_updates = sims > 0.45 # standard prototype margin
-                        for c in preds[valid_updates].unique():
-                            c_mask = (preds == c) & valid_updates
-                            if not c_mask.any(): continue
-                            weights = sims[c_mask] / sims[c_mask].sum()
-                            pull_vec = (active_enc[c_mask] * weights.unsqueeze(1)).sum(dim=0)
-                            model.proto_momentum[c] = 0.9 * model.proto_momentum[c] + 0.1 * pull_vec
-                            eff_lr = 0.01 * sims[c_mask].mean().item()
-                            upd = (1.0 - eff_lr) * model.classify.weight[c] + eff_lr * model.proto_momentum[c]
-                            model.classify.weight[c] = torch.nn.functional.normalize(upd.unsqueeze(0), dim=1).squeeze(0)
+                    model.prototype_update(
+                        proj_in,
+                        learning_rate=0.01,
+                        threshold=0.45
+                    )
     
     avg_firing_rate = 0.0
     if hasattr(model, '_firing_log') and len(model._firing_log) > 0:
@@ -361,7 +345,7 @@ def populate_knn_bank(model, data_dir, arch_cfg, data_cfg, device):
 def main():
     parser = argparse.ArgumentParser(description="Test Unsupervised Updates on KITTI-C")
     parser.add_argument('--pretrain', action='store_true', help='Run pretraining on SemanticKITTI before evaluating')
-    parser.add_argument('--standard', action='store_true', help='Use standard protocol: full sequence per corruption, reset model between corruptions, 3-pass evaluation for true initial/final metrics (no running-total skew).')
+    parser.add_argument('--chunked', action='store_true', help='Use D3CTTA chunked protocol: continuous adaptation across disjoint 1/7th splits instead of full independent sequences.')
     parser.add_argument('--reset_per_corruption', action='store_true', help='Reset the model to the clean pretrained weights before adapting on each corruption (even when using chunks).')
     parser.add_argument('--skip_extractor', action='store_true', help='Skip feature extractor pretraining and only retrain the HDC model')
     parser.add_argument('--pretrained_path', type=str, default='logs/kitti_pretrain/hdc_sub.pth', help='Path to load pretrained model')
@@ -415,7 +399,7 @@ def main():
             logger.info(f"Successfully pretrained model on SemanticKITTI. Optimizer state saved to {opt_path}")
             
     sev = args.severity
-    methods_to_run = ['frozen', 'prototype', 'knn'] if args.method == 'all' else [args.method]
+    methods_to_run = ['prototype', 'knn'] if args.method == 'all' else [args.method]
     
     global_results = {
         'mIoU': {m: {c: {} for c in CORRUPTIONS} for m in methods_to_run},
@@ -474,7 +458,7 @@ def main():
             clean_bank = {k: v.clone() for k, v in model.bank.items()}
 
         for i, ctype in enumerate(active_corruptions):
-            if args.reset_per_corruption and not args.standard:
+            if args.reset_per_corruption and args.chunked:
                 logger.info("Resetting model to clean pretrained weights for this corruption.")
                 model = load_hdc_model(args.pretrained_path, num_classes=NUM_CLASSES)
                 if current_method == 'knn':
@@ -525,11 +509,13 @@ def main():
                 f"Chunks will misalign."
             )
             
-            if args.standard:
+            if not args.chunked:
                 # Standard protocol: full sequence, independent adaptation
                 chunk_dataset = full_corruption_dataset
                 # Reset model before each corruption
                 model = load_hdc_model(args.pretrained_path, num_classes=NUM_CLASSES)
+                if current_method == 'knn':
+                    model.bank = {k: v.clone() for k, v in clean_bank.items()}
             else:
                 # D3CTTA protocol: chunks, continuous adaptation
                 chunk_dataset = torch.utils.data.Subset(full_corruption_dataset, chunks[i])
@@ -537,7 +523,7 @@ def main():
             target_dataloader = DataLoader(chunk_dataset, batch_size=1, shuffle=False, num_workers=ARCH["train"]["workers"])
             
             try:
-                if args.standard or args.reset_per_corruption:
+                if not args.chunked or args.reset_per_corruption:
                     # Pass 1: True Initial (Frozen on chunk)
                     logger.info("  -> Pass 1: Computing True Initial metrics (Frozen)")
                     init_metrics = evaluate_and_adapt(model, target_dataloader, device, eval_only=True, dry_run=args.dry_run)

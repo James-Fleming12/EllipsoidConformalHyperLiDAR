@@ -616,6 +616,64 @@ class KNNModel(nn.Module):
             self.classify.weight[c_id] = updated_weight_norm
 
         return full_predictions
+
+    @torch.no_grad()
+    def prototype_update(self, x, learning_rate=0.01, threshold=0.45):
+        """
+        Baseline prototype gating: updates the class prototypes using EMA, 
+        weighted by standard cosine similarity to the prototype.
+        """
+        self.eval()
+        enc, _, _ = self.encode(x)
+        num_total_samples = enc.shape[0]
+
+        original_x = x.permute(0, 2, 3, 1).contiguous().reshape(-1, x.shape[1])
+        valid_enc_mask = torch.any(original_x != 0, dim=1) # ignore background
+        
+        if not torch.any(valid_enc_mask):
+            return torch.zeros(num_total_samples, device=self.device, dtype=torch.long)
+        
+        active_enc = F.normalize(enc[valid_enc_mask])
+        if active_enc.dtype != self.classify.weight.dtype:
+            active_enc = active_enc.to(self.classify.weight.dtype)
+
+        # Get logits using normalized enc against normalized prototypes
+        normalized_prototypes = F.normalize(self.classify.weight)
+        sims = F.linear(active_enc, normalized_prototypes)
+        
+        max_sims, predictions = sims.max(dim=1)
+        
+        full_predictions = torch.zeros(num_total_samples, device=self.device, dtype=torch.long)
+        full_predictions[valid_enc_mask] = predictions
+
+        valid_updates = max_sims > threshold
+        if not torch.any(valid_updates):
+            return full_predictions
+            
+        unique_classes = predictions[valid_updates].unique()
+        
+        for c_id in unique_classes:
+            c = c_id.item()
+            c_mask = (predictions == c) & valid_updates
+            if not c_mask.any():
+                continue
+                
+            class_sims = max_sims[c_mask]
+            sample_encs = active_enc[c_mask]
+            
+            # Weighting by similarity
+            weights = class_sims / class_sims.sum()
+            pull_vec = (sample_encs * weights.unsqueeze(1)).sum(dim=0)
+            
+            effective_lr = learning_rate * class_sims.mean().item()
+            
+            current_weight = self.classify.weight[c]
+            self.proto_momentum[c] = 0.9 * self.proto_momentum[c] + 0.1 * pull_vec
+            
+            updated_weight = (1.0 - effective_lr) * current_weight + effective_lr * self.proto_momentum[c]
+            self.classify.weight[c] = F.normalize(updated_weight.unsqueeze(0), dim=1).squeeze(0)
+            
+        return full_predictions
     
 def set_knn_model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device, subcluster_type='bipolar'):
     return KNNModel(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device)
