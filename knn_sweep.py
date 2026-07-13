@@ -97,7 +97,7 @@ def knn_dists(H, bank, k, chunk=CHUNK):
         h = H[i:i + chunk]
         sims = h @ bank.T                       # (chunk, n_bank)
         topk = sims.topk(kk, dim=1).values      # nearest = HIGHEST similarity
-        out[i:i + chunk] = (1.0 - topk).mean(dim=1)
+        out[i:i + chunk] = (1.0 - topk).clamp_min(0.0).mean(dim=1)
     return out
 
 
@@ -257,7 +257,7 @@ def main():
         row = {}
         for cond, (H, P, C, M) in tgt.items():
             if arm == "ball":
-                s = torch.full((H.shape[0],), -1e9, device=device, dtype=H.dtype)
+                s = torch.full((H.shape[0],), -6e4, device=device, dtype=H.dtype)
                 for c in P.unique().tolist():
                     if c not in valid:
                         continue
@@ -284,8 +284,8 @@ def main():
     for k in KS:
         row_in, row_ratio = {}, {}
         for cond, (H, P, C, M) in tgt.items():
-            s_in = torch.full((H.shape[0],), 1e9, device=device, dtype=H.dtype)
-            s_ratio = torch.full((H.shape[0],), 1e9, device=device, dtype=H.dtype)
+            s_in = torch.full((H.shape[0],), 6e4, device=device, dtype=H.dtype)
+            s_ratio = torch.full((H.shape[0],), 6e4, device=device, dtype=H.dtype)
             for c in P.unique().tolist():
                 if c not in valid:
                     continue
@@ -296,7 +296,7 @@ def main():
                 out_bank = torch.cat([src[o] for o in valid if o != c], dim=0)
                 d_out = knn_dists(Hc, out_bank, k)
                 s_in[m] = d_in
-                s_ratio[m] = d_in / d_out.clamp_min(1e-8)
+                s_ratio[m] = d_in / d_out.clamp_min(1e-4)
             # negate: these are DISTANCES / distance-ratios (lower = more trustworthy)
             a_in, _ = per_class_auroc((-s_in).cpu().numpy(), C, P.cpu().numpy(), valid)
             a_rt, _ = per_class_auroc((-s_ratio).cpu().numpy(), C, P.cpu().numpy(), valid)
