@@ -11,11 +11,10 @@ from torch.utils.data import DataLoader
 from dataset.kitti.parser import Parser
 from modules.HDC_utils import EllipsoidModel
 
-unsup_kitti_c = importlib.import_module("unsup_kitti-c")
-LiDARCorruptionWrapper = unsup_kitti_c.LiDARCorruptionWrapper
+import os
 
-# ---------------------------------------------------------------------------- config
 DATA_DIR = "/mnt/alpha/jmfleming/KITTI"
+KITTIC_DIR = "/mnt/bravo/jmfleming/OpenDataLab___SemanticKITTI-C/SemanticKITTI-C"
 CONFIG_ARCH = "config/arch/senet-2048p.yml"
 CONFIG_LABELS = "config/labels/semantic-kitti-all.yaml"
 MODEL_DIR = "logs/kitti_pretrain"
@@ -29,16 +28,6 @@ COVERAGE = 0.90
 MAX_PER_CLASS = 5000
 RADIUS_QUANTILE = 0.99
 OUT = "rank_sweep.json"
-
-
-# ==================================================================== ellipsoid math
-# An ellipsoid is just (mu, V_high, R). The paper's preconditioner is
-#     M^{-1/2} = I + (d^{-1/2} - 1) V_high V_high^T
-# and because V_high is orthonormal, the score has a closed form that never forms a
-# d x d matrix:
-#     score^2 = ||h - mu||^2 - (1 - 1/d) * ||V_high^T (h - mu)||^2
-# i.e. the component ORTHOGONAL to the high-variance subspace keeps its full length;
-# the component INSIDE it is shrunk by d^{-1/2}. That is the whole construction.
 
 @torch.no_grad()
 def score_ellipsoid(H, mu, V, d):
@@ -169,9 +158,25 @@ def main():
     for cond in CORRUPTIONS:
         print(f"Collecting target hypervectors: {cond} sev {SEVERITY}...")
         try:
-            wrapped = LiDARCorruptionWrapper(clean_ds, corruption_type=cond,
-                                             severity=SEVERITY)
-            ld = DataLoader(wrapped, batch_size=1, shuffle=False, num_workers=0)
+            SEVERITY_MAP = {1: 'light', 3: 'moderate', 5: 'heavy'}
+            sev_str = SEVERITY_MAP.get(SEVERITY, 'moderate')
+            corruption_root = os.path.join(KITTIC_DIR, cond, sev_str)
+            seq_dir = os.path.join(corruption_root, "sequences")
+            if not os.path.exists(seq_dir):
+                os.makedirs(seq_dir, exist_ok=True)
+                os.symlink("..", os.path.join(seq_dir, "08"))
+            
+            parser_obj = Parser(
+                root=corruption_root,
+                train_sequences=DATA["split"]["valid"],
+                valid_sequences=DATA["split"]["valid"],
+                test_sequences=None,
+                labels=DATA["labels"], color_map=DATA.get("color_map", {}),
+                learning_map=DATA["learning_map"], learning_map_inv=DATA["learning_map_inv"],
+                sensor=ARCH["dataset"]["sensor"], max_points=ARCH["dataset"]["max_points"],
+                batch_size=1, workers=0, gt=True, shuffle_train=False,
+            )
+            ld = parser_obj.get_valid_set()
             H, P, C = collect_target(model, ld, device)
             acc = C.float().mean().item()
             print(f"  n={len(C)}  pseudo-label acc={acc:.3f}")
@@ -231,8 +236,7 @@ def main():
 
     print("\n" + "=" * 78)
     print(f"ball  (r=0):   AUROC={base:.4f}  log_vol={results[0]['mean_log_volume']:.1f}")
-    print(f"best  (r={best_r}):  AUROC={best:.4f}  "
-          f"log_vol={results[best_r]['mean_log_volume']:.1f}")
+    print(f"best  (r={best_r}):  AUROC={best:.4f}  log_vol={results[best_r]['mean_log_volume']:.1f}")
 
     if delta > 0.02:
         print(f"\n=> SHAPE HELPS (+{delta:.4f} AUROC over the ball). The anisotropy")
