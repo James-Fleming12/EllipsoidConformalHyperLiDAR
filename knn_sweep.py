@@ -252,7 +252,7 @@ def main():
     print("\n" + "=" * 76)
     print("BASELINE ARMS")
     print("=" * 76)
-    protos = F.normalize(model.classify.weight)
+    protos = F.normalize(model.classify.weight).detach()
     for arm in ("ball", "prototype", "margin"):
         row = {}
         for cond, (H, P, C, M) in tgt.items():
@@ -266,7 +266,7 @@ def main():
                 s = s.cpu().numpy()
             elif arm == "prototype":
                 sims = H.to(protos.dtype) @ protos.T
-                s = sims.gather(1, P.unsqueeze(1)).squeeze(1).cpu().numpy()
+                s = sims.gather(1, P.unsqueeze(1)).squeeze(1).detach().cpu().numpy()
             else:  # margin = top1 - top2 prototype similarity
                 s = M
             a, nc = per_class_auroc(s, C, P.cpu().numpy(), valid)
