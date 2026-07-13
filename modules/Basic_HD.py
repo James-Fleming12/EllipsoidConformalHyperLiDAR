@@ -424,7 +424,7 @@ class BasicHD():
         print('Class Jaccard: ', class_jaccard)
         return iou.avg
     
-class DensityTrainer():
+class EllipsoidTrainer():
     def __init__(self, ARCH, DATA, datadir, logdir, modeldir, logger, bipolar_prototypes=False, bipolar_subclusters=False):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

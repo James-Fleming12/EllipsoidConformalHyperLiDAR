@@ -9,3 +9,4 @@ common/*
 *.txt
 *.png
 thirdparty
+*.pdf
