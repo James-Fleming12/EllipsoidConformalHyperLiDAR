@@ -8,6 +8,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 
 from common.laserscan import SemLaserScan, LaserScan
 from dataset.kitti.parser import Parser
@@ -196,11 +197,10 @@ def evaluate_and_adapt(model, target_dataloader, device, eval_only=False, update
                         use_anchor=True,
                         proj_xyz=proj_xyz
                     )
-                elif update_method == 'knn':
-                    thresh = getattr(model, 'knn_threshold', -1.2)
+                elif update_method in ['knn', 'prototype', 'aci']:
+                    target_coverage = 0.50
                     
-                    # Print diagnostics on the first frame
-                    if not hasattr(model, '_printed_diagnostics'):
+                    if batch_idx % 100 == 0:
                         model.eval()
                         with torch.no_grad():
                             enc, _, _ = model.encode(proj_in)
@@ -208,34 +208,35 @@ def evaluate_and_adapt(model, target_dataloader, device, eval_only=False, update
                             if torch.any(valid):
                                 enc_norm = F.normalize(enc[valid], dim=1).to(model.classify.weight.dtype)
                                 preds = model.classify(enc_norm).argmax(dim=1)
-                                conf = model.get_confidence(enc_norm, preds)
-                                ratios = -conf
-                                
                                 true_labels = proj_labels.view(-1)[valid]
                                 correct = (preds == true_labels)
-                                admitted = conf > thresh
                                 
-                                print("\n--- KNN Gate Diagnostics ---")
-                                print(f"Ratio (d_in/d_out) Range: min={ratios.min().item():.4f}, median={ratios.median().item():.4f}, max={ratios.max().item():.4f}")
-                                print(f"Threshold Set: {thresh:.4f} (Ratio threshold: {-thresh:.4f})")
-                                print(f"Firing Rate: {admitted.float().mean().item()*100:.1f}%")
-                                print(f"Frame Accuracy: {correct.float().mean().item()*100:.1f}%")
-                                if admitted.any():
-                                    print(f"Admitted Accuracy: {correct[admitted].float().mean().item()*100:.1f}%")
-                                print("----------------------------\n")
-                                model._printed_diagnostics = True
-
-                    model.online_update(
-                        proj_in,
-                        learning_rate=0.01,
-                        coverage=0.50
-                    )
-                elif update_method == 'prototype':
-                    model.prototype_update(
-                        proj_in,
-                        learning_rate=0.01,
-                        coverage=0.50
-                    )
+                                if update_method == 'knn':
+                                    conf = model.get_confidence(enc_norm, preds)
+                                    thresh = torch.quantile(conf.float(), 1.0 - target_coverage).item()
+                                    admitted = conf > thresh
+                                elif update_method == 'prototype':
+                                    sims = F.linear(enc_norm, F.normalize(model.classify.weight, dim=1))
+                                    max_sims, _ = sims.max(dim=1)
+                                    thresh = torch.quantile(max_sims.float(), 1.0 - target_coverage).item()
+                                    admitted = max_sims > thresh
+                                elif update_method == 'aci':
+                                    sims = F.linear(enc_norm, F.normalize(model.classify.weight, dim=1))
+                                    max_sims, _ = sims.max(dim=1)
+                                    thresh = getattr(model, 'aci_q', getattr(model, 'prototype_threshold', 0.45))
+                                    admitted = max_sims > thresh
+                                    
+                                print(f"\n[Frame {batch_idx}] {update_method.upper()} Gate (Coverage/ACI):")
+                                print(f"Threshold: {thresh:.4f} | Firing Rate: {admitted.float().mean().item()*100:.1f}%")
+                                print(f"Frame Acc: {correct.float().mean().item()*100:.1f}% | Admitted Acc: {correct[admitted].float().mean().item()*100:.1f}%" if admitted.any() else f"Frame Acc: {correct.float().mean().item()*100:.1f}% | Admitted Acc: N/A")
+                                print("-" * 50)
+                                
+                    if update_method == 'knn':
+                        model.online_update(proj_in, learning_rate=0.01, coverage=target_coverage)
+                    elif update_method == 'prototype':
+                        model.prototype_update(proj_in, learning_rate=0.01, coverage=target_coverage)
+                    elif update_method == 'aci':
+                        model.prototype_update_aci(proj_in, learning_rate=0.01, gamma=0.05, target_setsize=1.0)
     
     avg_firing_rate = 0.0
     if hasattr(model, '_firing_log') and len(model._firing_log) > 0:

@@ -724,6 +724,69 @@ class KNNModel(nn.Module):
             self.classify.weight[c] = F.normalize(updated_weight.unsqueeze(0), dim=1).squeeze(0)
             
         return full_predictions
+
+    @torch.no_grad()
+    def prototype_update_aci(self, x, learning_rate=0.01, gamma=0.05, target_setsize=1.0):
+        """
+        Label-free ACI driven by prediction-set size (Proposed Method).
+        Uses the set size as an unsupervised miscoverage surrogate to dynamically
+        tune the admission threshold without ground-truth labels.
+        """
+        self.eval()
+        enc, _, _ = self.encode(x)
+        num_total_samples = enc.shape[0]
+
+        original_x = x.permute(0, 2, 3, 1).contiguous().reshape(-1, x.shape[1])
+        valid_enc_mask = torch.any(original_x != 0, dim=1) # ignore background
+        
+        if not hasattr(self, 'aci_q'):
+            self.aci_q = getattr(self, 'prototype_threshold', 0.45)
+            
+        full_predictions = torch.zeros(num_total_samples, device=self.device, dtype=torch.long)
+        
+        if not torch.any(valid_enc_mask):
+            return full_predictions
+        
+        active_enc = F.normalize(enc[valid_enc_mask], dim=1)
+        if active_enc.dtype != self.classify.weight.dtype:
+            active_enc = active_enc.to(self.classify.weight.dtype)
+
+        normalized_prototypes = F.normalize(self.classify.weight, dim=1)
+        sims = F.linear(active_enc, normalized_prototypes)
+        
+        max_sims, predictions = sims.max(dim=1)
+        valid_mask = max_sims > self.aci_q
+        
+        full_predictions[valid_enc_mask] = predictions
+
+        unique_classes = predictions[valid_mask].unique()
+        for c_id in unique_classes:
+            c = c_id.item()
+            c_mask = (predictions == c) & valid_mask
+            if not c_mask.any():
+                continue
+                
+            class_sims = max_sims[c_mask]
+            sample_encs = active_enc[c_mask]
+            
+            # Weighting by similarity
+            weights = class_sims / class_sims.sum()
+            pull_vec = (sample_encs * weights.unsqueeze(1)).sum(dim=0)
+            
+            effective_lr = learning_rate * class_sims.mean().item()
+            
+            current_weight = self.classify.weight[c]
+            self.proto_momentum[c] = 0.9 * self.proto_momentum[c] + 0.1 * pull_vec
+            
+            updated_weight = (1.0 - effective_lr) * current_weight + effective_lr * self.proto_momentum[c]
+            self.classify.weight[c] = F.normalize(updated_weight.unsqueeze(0), dim=1).squeeze(0)
+
+        # Label-free ACI update step
+        set_size = (sims >= self.aci_q).sum(dim=1).float().mean().item()
+        err = set_size - target_setsize
+        self.aci_q = float(np.clip(self.aci_q + gamma * err * 0.1, -1.0, 1.0))
+
+        return full_predictions
     
 def set_knn_model(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device, subcluster_type='bipolar'):
     return KNNModel(ARCH, modeldir, hd_encoder, num_levels, randomness, num_classes, device)
