@@ -5,6 +5,24 @@ import torch
 import torch.nn.functional as F
 import yaml
 
+import sys
+
+class Logger(object):
+    def __init__(self, filename="gap_analysis.log"):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.log.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+sys.stdout = Logger("gap_analysis.log")
+
 from dataset.kitti.parser import Parser
 from modules.HDC_utils import set_knn_model
 
@@ -18,8 +36,8 @@ NUM_CLASSES = 17
 CONDITIONS = ["snow/light", "snow/heavy", "cross_sensor/heavy", "wet_ground/moderate"]
 COVERAGES = [0.05, 0.10, 0.25, 0.50, 0.75]
 LR = 0.01
-N_ADAPT = 300
-N_EVAL = 100
+N_ADAPT = 1000   # Increased from 300 to give rare classes time to move
+N_EVAL = 500     # Increased from 100 for more robust mIoU
 OUT = "gap_analysis.json"
 
 
@@ -52,11 +70,9 @@ def encode_frame(model, x, y, device):
 
 
 @torch.no_grad()
-def calibrate(model, loader, device, coverage, mondrian, n=50):
+def calibrate(model, loader, device, coverage, mondrian, n=100):
     """Return threshold(s) on CLEAN SOURCE data.
-
-    mondrian=False -> one global threshold  (marginal coverage; what everyone does)
-    mondrian=True  -> one threshold PER CLASS (class-conditional coverage; the proposal)
+    Increased to 100 frames to give rare classes a better chance of non-empty calibration.
     """
     scores = {c: [] for c in range(NUM_CLASSES)}
     allsc = []
@@ -80,13 +96,14 @@ def calibrate(model, loader, device, coverage, mondrian, n=50):
         q = torch.quantile(a, 1.0 - coverage).item()
         return {c: q for c in range(NUM_CLASSES)}
 
-    # Mondrian: calibrate WITHIN each class, so every class admits its own top X%
+    # Mondrian: calibrate WITHIN each class
     qs = {}
     glob = torch.quantile(torch.cat(allsc).float(), 1.0 - coverage).item()
     for c in range(NUM_CLASSES):
         if scores[c]:
             v = torch.cat(scores[c]).float()
-            qs[c] = torch.quantile(v, 1.0 - coverage).item() if v.numel() > 20 else glob
+            # lowered fallback threshold to 5 points since we know rare classes are critical
+            qs[c] = torch.quantile(v, 1.0 - coverage).item() if v.numel() >= 5 else glob
         else:
             qs[c] = glob
     return qs
@@ -100,6 +117,7 @@ def run(model, loader, device, src_proto, qs, soft=False,
     fire_n = torch.zeros(NUM_CLASSES, device=device)
     seen_n = torch.zeros(NUM_CLASSES, device=device)
     prec_n = torch.zeros(NUM_CLASSES, device=device)
+    gt_n_adapt = torch.zeros(NUM_CLASSES, device=device)
 
     qv = torch.tensor([qs[c] for c in range(NUM_CLASSES)], device=device)
 
@@ -117,6 +135,9 @@ def run(model, loader, device, src_proto, qs, soft=False,
         thr = qv[preds]
         admit = s >= thr
 
+        for c in labels.unique().tolist():
+            gt_n_adapt[c] += (labels == c).sum()
+
         for c in preds.unique().tolist():
             m = preds == c
             seen_n[c] += m.sum()
@@ -128,8 +149,6 @@ def run(model, loader, device, src_proto, qs, soft=False,
             for c in preds[admit].unique().tolist():
                 m = (preds == c) & admit
                 if soft:
-                    # SOFT: weight by how far above threshold (HyperDUM-style weighting,
-                    # and the project's own "purification beats filtration" lesson)
                     w = (s[m] - qs[c]).clamp_min(0).unsqueeze(1)
                     pull = (h[m] * w).sum(0) / w.sum().clamp_min(1e-8)
                 else:
@@ -154,12 +173,20 @@ def run(model, loader, device, src_proto, qs, soft=False,
         hist += fast_hist(preds, labels, NUM_CLASSES)
 
     iou, seen = per_class_iou(hist)
-    miou = iou[seen].mean().item() * 100
     fr = (fire_n / seen_n.clamp_min(1)).cpu().numpy()
     pc = (prec_n / fire_n.clamp_min(1)).cpu().numpy()
-    return {"miou": miou, "per_class_iou": (iou * 100).cpu().numpy(),
+    
+    return {"per_class_iou": (iou * 100).cpu().numpy(),
             "seen": seen.cpu().numpy(), "fire_rate": fr, "precision": pc,
-            "n_seen": seen_n.cpu().numpy()}
+            "n_seen": seen_n.cpu().numpy(), "gt_n_adapt": gt_n_adapt.cpu().numpy(),
+            "hist": hist.cpu().numpy()}
+
+
+def get_live_miou(run_dict, live_classes):
+    """Computes mIoU strictly over the live classes that the source model can actually predict."""
+    if not live_classes:
+        return 0.0
+    return np.nanmean([run_dict["per_class_iou"][c] for c in live_classes])
 
 
 def main():
@@ -210,9 +237,19 @@ def main():
         print(f"\n{'='*78}\n{cond}\n{'='*78}")
         results[cond] = {}
 
-        # ---- D3: coverage operating point, marginal vs mondrian ---------------
-        print(f"\nD3/D4: coverage sweep  (marginal = one global q; "
-              f"mondrian = one q PER CLASS)")
+        # 1. Establish live classes using frozen model
+        print("Evaluating frozen baseline to determine live classes...")
+        frozen = run(model, loader, device, src, {c: 9.9 for c in range(NUM_CLASSES)})
+        
+        # A class is 'live' if the frozen model achieves at least 1.0 IoU on it.
+        # This explicitly removes hallucinated classes (GT=0, Pred>0) and completely dead classes.
+        live_classes = [c for c in range(NUM_CLASSES) if frozen['per_class_iou'][c] >= 1.0]
+        frozen_live_miou = get_live_miou(frozen, live_classes)
+        print(f"Found {len(live_classes)} live classes: {live_classes}")
+        print(f"Frozen LIVE mIoU: {frozen_live_miou:.2f}")
+
+        # ---- D3/D4: coverage operating point on LIVE CLASSES ------------------
+        print(f"\nD3/D4: coverage sweep  (marginal = global q; mondrian = per-class q)")
         print(f"{'cov':>6} {'marg mIoU':>10} {'mond mIoU':>10} {'mond-marg':>10} "
               f"{'marg minfire':>13} {'mond minfire':>13}")
         for cov in COVERAGES:
@@ -220,82 +257,56 @@ def main():
             q_c = calibrate(model, src_loader, device, cov, mondrian=True)
             rm = run(model, loader, device, src, q_m)
             rc = run(model, loader, device, src, q_c)
-            # the KEY number: the LEAST-fired class. If marginal starves some class to
-            # ~0 while mondrian keeps it near `cov`, that is the mechanism.
-            seen_m = rm["n_seen"] > 100
+            
+            rm_miou = get_live_miou(rm, live_classes)
+            rc_miou = get_live_miou(rc, live_classes)
+            
+            # minfire computed strictly over live classes
+            seen_m = np.array([True if c in live_classes and rm["n_seen"][c] > 100 else False for c in range(NUM_CLASSES)])
             mn_m = rm["fire_rate"][seen_m].min() * 100 if seen_m.any() else float("nan")
             mn_c = rc["fire_rate"][seen_m].min() * 100 if seen_m.any() else float("nan")
-            print(f"{cov:>6.2f} {rm['miou']:>10.2f} {rc['miou']:>10.2f} "
-                  f"{rc['miou']-rm['miou']:>+10.2f} {mn_m:>13.1f} {mn_c:>13.1f}")
+            
+            print(f"{cov:>6.2f} {rm_miou:>10.2f} {rc_miou:>10.2f} "
+                  f"{rc_miou-rm_miou:>+10.2f} {mn_m:>13.1f} {mn_c:>13.1f}")
             results[cond][f"cov{cov}"] = {
-                "marginal_miou": rm["miou"], "mondrian_miou": rc["miou"],
-                "marginal_fire": rm["fire_rate"].tolist(),
-                "mondrian_fire": rc["fire_rate"].tolist(),
+                "marginal_miou_live": rm_miou, "mondrian_miou_live": rc_miou,
             }
 
-        # ---- D1/D2: per-class starvation at the standard 50% operating point ---
+        # ---- D1/D2: per-class starvation and IoU delta at 50% coverage ---------
         q_m = calibrate(model, src_loader, device, 0.50, mondrian=False)
         q_c = calibrate(model, src_loader, device, 0.50, mondrian=True)
         rm = run(model, loader, device, src, q_m)
         rc = run(model, loader, device, src, q_c)
-        frozen = run(model, loader, device, src, {c: 9.9 for c in range(NUM_CLASSES)})
 
-        print(f"\nD1/D2: per-class, at 50% marginal coverage")
-        print(f"{'cls':>4} {'n_pts':>9} {'fire_marg':>10} {'fire_mond':>10} "
-              f"{'IoU_frozen':>11} {'IoU_marg':>9} {'IoU_mond':>9}")
-        order = np.argsort(-rm["n_seen"])
+        print(f"\nD1/D2: PER-CLASS BREAKDOWN (Live Classes Only, 50% Coverage)")
+        print(f"{'cls':>4} {'GT_pts':>9} {'Pred_pts':>9} {'fire_marg':>10} {'fire_mond':>10} "
+              f"{'IoU_froz':>9} {'IoU_marg':>9} {'IoU_mond':>9} {'delta':>8}")
+        
+        # Sort live classes by true GT point count descending
+        order = sorted(live_classes, key=lambda c: frozen['gt_n_adapt'][c], reverse=True)
         for c in order:
-            if rm["n_seen"][c] < 100:
-                continue
-            print(f"{c:>4} {int(rm['n_seen'][c]):>9} "
-                  f"{rm['fire_rate'][c]*100:>9.1f}% {rc['fire_rate'][c]*100:>9.1f}% "
-                  f"{frozen['per_class_iou'][c]:>11.1f} "
-                  f"{rm['per_class_iou'][c]:>9.1f} {rc['per_class_iou'][c]:>9.1f}")
-        print(f"\n  mIoU  frozen={frozen['miou']:.2f}  "
-              f"marginal={rm['miou']:.2f}  mondrian={rc['miou']:.2f}")
-
-        # ---- D5: soft weighting vs hard gate ----------------------------------
-        rs = run(model, loader, device, src, q_c, soft=True)
-        print(f"\nD5: hard gate={rc['miou']:.2f}   soft weight={rs['miou']:.2f}")
-        results[cond]["soft_miou"] = rs["miou"]
+            gt_pts = int(frozen['gt_n_adapt'][c])
+            pred_pts = int(rm['n_seen'][c])
+            fm = rm['fire_rate'][c]*100
+            fc = rc['fire_rate'][c]*100
+            ifz = frozen['per_class_iou'][c]
+            im = rm['per_class_iou'][c]
+            ic = rc['per_class_iou'][c]
+            delta = ic - im
+            
+            print(f"{c:>4} {gt_pts:>9} {pred_pts:>9} "
+                  f"{fm:>9.1f}% {fc:>9.1f}% "
+                  f"{ifz:>9.1f} {im:>9.1f} {ic:>9.1f} {delta:>+8.1f}")
+                  
+        rm_miou = get_live_miou(rm, live_classes)
+        rc_miou = get_live_miou(rc, live_classes)
+        print(f"\n  LIVE mIoU:  frozen={frozen_live_miou:.2f}  "
+              f"marginal={rm_miou:.2f}  mondrian={rc_miou:.2f}  "
+              f"(Delta: {rc_miou - rm_miou:+.2f})")
 
     with open(OUT, "w") as f:
         json.dump(results, f, indent=2, default=float)
     print(f"\nsaved -> {OUT}")
-
-    print("""
-================================================================================
-WHAT EACH OUTCOME MEANS
-================================================================================
-D1 (per-class firing under MARGINAL coverage)
-   If rare classes fire at ~0% while common classes fire at 60-80%, the gate is
-   allocating adaptation signal by CLASS FREQUENCY -- which is exactly backwards for
-   mIoU. That is the gap, and it is structural, not a tuning issue.
-
-D4 (mondrian - marginal)
-   If mondrian > marginal, class-conditional conformal calibration is the contribution.
-   It is novel for TTA, conformal-native (Vovk's Mondrian CP), and it targets the
-   metric you actually report. The `minfire` columns are the mechanism: marginal should
-   starve some class to near 0 while mondrian holds every class near `cov`.
-
-D3 (coverage sweep)
-   NOBODY HAS SWEPT THIS. Precision at 10% coverage was 99.2%. If mIoU peaks at 10-25%
-   rather than 50%, then every adaptive-threshold idea so far (ACI, set-size) was
-   loosening a gate that should have been TIGHTENED. That alone reframes the story.
-
-D5 (soft vs hard)
-   HyperDUM weights rather than gates, and this project's own early finding was
-   "purification beats filtration". If soft > hard, the gate should be a WEIGHT, and
-   the conformal p-value is the natural weight.
-
-IF MONDRIAN WINS, THE PAPER IS:
-   "Marginal conformal calibration is the wrong objective for segmentation TTA, because
-   coverage is marginal while the metric is class-balanced. We give class-conditional
-   conformal pseudo-label gating, which equalizes adaptation signal across classes and
-   directly optimizes the reported metric. We further show that set-valued CP (as in
-   ConformalHDC) is vacuous in HDC, because well-separated prototypes make prediction
-   sets degenerate (|C| in {0,1})."
-""")
 
 
 if __name__ == "__main__":
