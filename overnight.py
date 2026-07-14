@@ -224,6 +224,9 @@ def adapt_and_eval(model, loader, device, src, live, *,
                    whether ANY gate could ever help.
     """
     torch.manual_seed(seed)
+    rng = np.random.RandomState(seed)
+    is_eval = rng.rand(n_frames) < 0.5
+    
     model.classify.weight.data = src.clone()
     qv = (torch.tensor([qs[c] for c in range(NUM_CLASSES)], device=device)
           if qs else None)
@@ -245,8 +248,8 @@ def adapt_and_eval(model, loader, device, src, live, *,
             continue
         h, sims, preds, labels = out
 
-        # ---- ODD frames: EVALUATE ONLY (never adapted on) ----
-        if i % 2 == 1:
+        # ---- EVALUATE ONLY (never adapted on) ----
+        if is_eval[i]:
             hist += fast_hist(preds, labels, NUM_CLASSES)
             if track and i % 50 == 1:
                 traj.append({
@@ -258,7 +261,7 @@ def adapt_and_eval(model, loader, device, src, live, *,
                 })
             continue
 
-        # ---- EVEN frames: ADAPT ----
+        # ---- ADAPT ----
         if mode == "frozen":
             continue
 
@@ -320,20 +323,18 @@ def adapt_and_eval(model, loader, device, src, live, *,
 
 @torch.no_grad()
 def supervised_ceiling(model, loader, device, src, live, n_frames=N_FRAMES):
-    """Refit prototypes FROM SCRATCH on target data using GT labels (even frames only),
-    then evaluate on odd frames.
-
-    This is the ABSOLUTE ceiling for a prototype classifier on this domain. If this is
-    barely above frozen, then the prototype layer is ALREADY near-optimal for these
-    features, there is no headroom, and no gating scheme -- however clever -- can matter.
-    That is the pivot signal.
+    """Refit prototypes FROM SCRATCH on target data using GT labels,
+    then evaluate. Uses seed=0 for the split to match adapt_and_eval.
     """
+    rng = np.random.RandomState(0)
+    is_eval = rng.rand(n_frames) < 0.5
+    
     acc = torch.zeros_like(src)
     cnt = torch.zeros(NUM_CLASSES, device=device)
     for i, b in enumerate(loader):
         if i >= n_frames:
             break
-        if i % 2 == 1:
+        if is_eval[i]:
             continue
         x, y = b[0].to(device), b[2].to(device).view(-1)
         if x.shape[1] == 0:
@@ -359,7 +360,7 @@ def supervised_ceiling(model, loader, device, src, live, n_frames=N_FRAMES):
     for i, b in enumerate(loader):
         if i >= n_frames:
             break
-        if i % 2 == 0:
+        if not is_eval[i]:
             continue
         x, y = b[0].to(device), b[2].to(device).view(-1)
         if x.shape[1] == 0:
