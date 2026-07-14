@@ -18,9 +18,9 @@ def main():
     ARCH = yaml.safe_load(open(CONFIG_ARCH))
     DATA = yaml.safe_load(open(CONFIG_LABELS))
     
-    print("Loading Model...")
     model = set_knn_model(ARCH, "logs/kitti_pretrain", 'rp', 0, 0, NUM_CLASSES, device)
     model.load_state_dict(torch.load(PRETRAINED, map_location=device), strict=False)
+    model.to(device)
     
     print(f"Loading Bank from {BANK_PATH}...")
     model.bank = torch.load(BANK_PATH, map_location=device)
