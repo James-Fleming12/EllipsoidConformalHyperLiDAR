@@ -10,7 +10,7 @@ KITTIC_DIR = "/mnt/bravo/jmfleming/OpenDataLab___SemanticKITTI-C/SemanticKITTI-C
 CONFIG_ARCH = "config/arch/senet-2048p.yml"
 CONFIG_LABELS = "config/labels/semantic-kitti-all.yaml"
 PRETRAINED = "logs/kitti_pretrain/hdc_sub.pth"
-BANK_PATH = "logs/knn_bank.pt"
+BANK_PATH = "/mnt/alpha/jmfleming/knn_bank.pt"
 NUM_CLASSES = 17
 
 def main():
