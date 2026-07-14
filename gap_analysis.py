@@ -93,12 +93,17 @@ def calibrate(model, loader, device, coverage, mondrian, n=500):
 
     if not mondrian:
         a = torch.cat(allsc).float()
+        if a.numel() > 10000000:
+            a = a[:: (a.numel() // 10000000 + 1)]
         q = torch.quantile(a, 1.0 - coverage).item()
         return {c: q for c in range(NUM_CLASSES)}
 
     # Mondrian: calibrate WITHIN each class
     qs = {}
-    glob = torch.quantile(torch.cat(allsc).float(), 1.0 - coverage).item()
+    glob_tensor = torch.cat(allsc).float()
+    if glob_tensor.numel() > 10000000:
+        glob_tensor = glob_tensor[:: (glob_tensor.numel() // 10000000 + 1)]
+    glob = torch.quantile(glob_tensor, 1.0 - coverage).item()
     
     sizes = {c: sum(t.numel() for t in scores[c]) if scores[c] else 0 for c in range(NUM_CLASSES)}
     valid_qs = {}
@@ -107,6 +112,8 @@ def calibrate(model, loader, device, coverage, mondrian, n=500):
     for c in range(NUM_CLASSES):
         if sizes[c] >= 200:
             v = torch.cat(scores[c]).float()
+            if v.numel() > 10000000:
+                v = v[:: (v.numel() // 10000000 + 1)]
             valid_qs[c] = torch.quantile(v, 1.0 - coverage).item()
             
     fallback_count = 0

@@ -190,7 +190,12 @@ def calibrate(model, loader, device, coverage, mondrian, n=None, min_n=None):
         for c in preds.unique().tolist():
             per[c].append(s[preds == c].cpu())
 
-    glob = torch.quantile(torch.cat(allsc).float(), 1.0 - coverage).item()
+    glob_tensor = torch.cat(allsc).float()
+    if glob_tensor.numel() > 10000000:
+        step = glob_tensor.numel() // 10000000 + 1
+        glob_tensor = glob_tensor[::step]
+    glob = torch.quantile(glob_tensor, 1.0 - coverage).item()
+    
     if not mondrian:
         return {c: glob for c in range(NUM_CLASSES)}, 0
 
@@ -198,6 +203,9 @@ def calibrate(model, loader, device, coverage, mondrian, n=None, min_n=None):
     for c in range(NUM_CLASSES):
         v = torch.cat(per[c]).float() if per[c] else torch.tensor([])
         if v.numel() >= min_n:
+            if v.numel() > 10000000:
+                step = v.numel() // 10000000 + 1
+                v = v[::step]
             qs[c] = torch.quantile(v, 1.0 - coverage).item()
         else:
             qs[c] = glob
