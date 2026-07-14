@@ -228,13 +228,13 @@ def evaluate_and_adapt(model, target_dataloader, device, eval_only=False, update
                     model.online_update(
                         proj_in,
                         learning_rate=0.01,
-                        threshold=thresh
+                        coverage=0.50
                     )
                 elif update_method == 'prototype':
                     model.prototype_update(
                         proj_in,
                         learning_rate=0.01,
-                        threshold=getattr(model, 'prototype_threshold', 0.45)
+                        coverage=0.50
                     )
     
     avg_firing_rate = 0.0

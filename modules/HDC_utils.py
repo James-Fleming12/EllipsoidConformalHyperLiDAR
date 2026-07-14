@@ -546,7 +546,7 @@ class KNNModel(nn.Module):
                 self.bank[c] = self.bank[c][-self.bank_size:]
                 
     @torch.no_grad()
-    def online_update(self, x, learning_rate=0.01, threshold=-1.0):
+    def online_update(self, x, learning_rate=0.01, threshold=None, coverage=None):
         """
         Takes an input batch x (cenet image), encodes it, computes k-NN confidence,
         and uses the highly confident samples to update the class prototypes 
@@ -578,6 +578,10 @@ class KNNModel(nn.Module):
         confidences = self.get_confidence(enc_norm, predictions)
         
         # Filter based on confidence threshold
+        if coverage is not None:
+            threshold = torch.quantile(confidences.float(), 1.0 - coverage).item()
+        elif threshold is None:
+            threshold = getattr(self, 'knn_threshold', -1.2)
         valid_mask = confidences > threshold
         
         if not torch.any(valid_mask):
@@ -659,7 +663,7 @@ class KNNModel(nn.Module):
         self.knn_threshold = torch.quantile(knn_scores.float(), 1.0 - coverage).item()
 
     @torch.no_grad()
-    def prototype_update(self, x, learning_rate=0.01, threshold=0.45):
+    def prototype_update(self, x, learning_rate=0.01, threshold=None, coverage=None):
         """
         Baseline prototype gating: updates the class prototypes using EMA, 
         weighted by standard cosine similarity to the prototype.
@@ -683,6 +687,11 @@ class KNNModel(nn.Module):
         sims = F.linear(active_enc, normalized_prototypes)
         
         max_sims, predictions = sims.max(dim=1)
+        
+        if coverage is not None:
+            threshold = torch.quantile(max_sims.float(), 1.0 - coverage).item()
+        elif threshold is None:
+            threshold = getattr(self, 'prototype_threshold', 0.45)
         
         full_predictions = torch.zeros(num_total_samples, device=self.device, dtype=torch.long)
         full_predictions[valid_enc_mask] = predictions
