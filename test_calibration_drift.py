@@ -193,13 +193,14 @@ def main():
                max_points=ARCH["dataset"]["max_points"],
                batch_size=1, workers=0, gt=True, shuffle_train=False)
     src_scores = []
-    for i, batch in enumerate(p.validloader):
-        if i >= 50:
-            break
-        x = batch[0].to(device)
-        if x.shape[1] == 0:
-            continue
-        enc, _, _ = model.encode(x)
+    with torch.no_grad():
+        for i, batch in enumerate(p.validloader):
+            if i >= 50:
+                break
+            x = batch[0].to(device)
+            if x.shape[1] == 0:
+                continue
+            enc, _, _ = model.encode(x)
         valid = torch.any(
             x.permute(0, 2, 3, 1).contiguous().reshape(-1, x.shape[1]) != 0, dim=1)
         h = F.normalize(enc[valid], dim=1).to(model.classify.weight.dtype)
