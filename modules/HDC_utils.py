@@ -635,7 +635,7 @@ class KNNModel(nn.Module):
         for c, hvs in self.bank.items():
             if hvs.shape[0] == 0: continue
             take = min(hvs.shape[0], 1000)
-            hvs_sub = hvs[:take]
+            hvs_sub = hvs[:take].to(self.device)
             
             # Prototype similarities (higher = better)
             sims = F.linear(hvs_sub, normalized_prototypes[c:c+1])
