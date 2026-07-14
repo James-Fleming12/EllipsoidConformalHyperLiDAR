@@ -506,13 +506,13 @@ class KNNModel(nn.Module):
                 
             # Compute d_in (distance to nearest neighbors within predicted class)
             k_in = min(self.k, in_bank.shape[0])
-            sims_in = hc @ in_bank.T
+            sims_in = hc.to(in_bank.dtype) @ in_bank.T
             topk_in = sims_in.topk(k_in, dim=1).values
             d_in = (1.0 - topk_in).clamp_min(0.0).mean(dim=1)
             
             # Compute d_out (distance to nearest neighbors across all other classes)
             k_out = min(self.k, out_bank.shape[0])
-            sims_out = hc @ out_bank.T
+            sims_out = hc.to(out_bank.dtype) @ out_bank.T
             topk_out = sims_out.topk(k_out, dim=1).values
             d_out = (1.0 - topk_out).clamp_min(0.0).mean(dim=1)
             
