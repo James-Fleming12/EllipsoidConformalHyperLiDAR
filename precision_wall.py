@@ -42,7 +42,7 @@ CONFIG_LABELS = "config/labels/semantic-kitti-all.yaml"
 PRETRAINED = "logs/kitti_pretrain/hdc_sub.pth"
 NUM_CLASSES = 17
 
-N_FRAMES = 2000
+N_FRAMES = 400
 SEEDS = [0, 1, 2]
 PRECISIONS = [100, 98, 95, 90, 85, 82, 80, 75, 70]
 LR = 0.01
@@ -253,13 +253,15 @@ def main():
     
     orc100 = run_precision_oracle(model, loader, dev, src, live, 100, mode="oracle", seed=0)
     print(f"Oracle global drift: {orc100['mean_drift']:.4f}")
-    print("\nPer-class drift (Oracle vs Frozen):")
-    print(f"{'Class':>5} | {'Frozen':>8} | {'Oracle':>8}")
-    for c in live:
-        print(f"{c:>5} | {f0['pc_drift'][c]:>8.4f} | {orc100['pc_drift'][c]:>8.4f}")
+    print("\nPer-class drift (Oracle vs Frozen) -- SHOWING ALL 17 CLASSES:")
+    print(f"{'Class':>5} | {'Frozen':>8} | {'Oracle':>8} | {'Status':>8}")
+    for c in range(NUM_CLASSES):
+        status = "LIVE" if c in live else "DEAD"
+        print(f"{c:>5} | {f0['pc_drift'][c]:>8.4f} | {orc100['pc_drift'][c]:>8.4f} | {status:>8}")
         
-    print("\n(If Oracle drift is 0.99 for some classes and 0.40 for others, the mean drift")
-    print("is dominated by a few violently oscillating classes, explaining why it's so high.)")
+    print("\n(Notice how the DEAD classes often move wildly -- sometimes even negative! ")
+    print("This is because they only fire on a handful of extremely noisy hallucinated frames,")
+    print("dragging the global mean drift down dramatically.)")
 
     print("\n" + "=" * 78)
     print("2. PER-CLASS SUPERVISED CEILING: Are rare classes learnable?")
@@ -272,7 +274,8 @@ def main():
         s_iou = sup["pc_iou"][c]
         print(f"{c:>5} | {f_iou:>8.2f} | {s_iou:>8.2f} | {s_iou - f_iou:>+8.2f}")
         
-    print(f"\nLive mIoU -> Frozen: {f0['miou']:.2f} | Ceiling: {sup['miou']:.2f}")
+    f0_live_miou = np.mean([f0["pc_iou"][c] for c in live])
+    print(f"\nLive mIoU (11 classes) -> Frozen: {f0_live_miou:.2f} | Ceiling: {sup['miou']:.2f}")
 
     print("\n" + "=" * 78)
     print("3. THE PRECISION WALL: Where does the gain vanish?")
